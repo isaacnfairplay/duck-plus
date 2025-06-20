@@ -11,11 +11,11 @@ Extensible API: Easy-to-use methods for common tasks like bulk inserts, query op
 
 Installation
 DuckDB Plus is not yet released but will be installable via pip once ready:
-pip install duckdb-plus
+pip install duck-plus
 
 It will support Python 3.8+ and DuckDB 0.8.0 or higher. For now, clone the repository to explore the code or contribute:
-git clone https://github.com/yourusername/duckdb-plus
-cd duckdb-plus
+git clone https://github.com/yourusername/duck-plus
+cd duck-plus
 pip install -e .
 
 Example Usage (Planned)
