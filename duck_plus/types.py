@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Protocol, List, Literal, Set, Optional
-import duckdb
 import os
+import duckdb
 
 SUPPORTED_EXTENSIONS = ("parquet", "csv", "xlsx")  # xlsx requires DuckDB 1.2
 
@@ -9,7 +9,7 @@ class TransformAlreadyAppliedError(Exception):
     """Raised when attempting to reapply a transform with the same name."""
     def __init__(self, transform_name: str, message: Optional[str] = None):
         self.transform_name = transform_name
-        super().__init__(f"Transform '{transform_name}' has already been applied. {message if message else ''}".strip())
+        super().__init__(f"Transform '{transform_name}' has already been applied{message and f': {message}' or ''}")
 
 @dataclass
 class ConnectedRelation:
