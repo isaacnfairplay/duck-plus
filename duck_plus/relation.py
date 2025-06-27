@@ -48,37 +48,48 @@ class Relation:
         Raises:
             ValueError: If using_columns is empty and how is not 'natural'.
         """
+        native_hows = {"left", "right", "outer", "semi", "inner", "anti"}
+        custom_natural = {
+            "natural", "natural left", "natural semi", "natural anti"
+        }
         if using_columns is None:
             using_columns = []
 
-        using_columns = [col.lower() for col in using_columns]
+        # Lowercase for comparison, but preserve original for SQL quoting
+        using_columns_lc = [col.lower() for col in using_columns]
 
         # Determine columns for natural join if needed
-        if not using_columns and "natural" in how:
+        if (not using_columns and any(how.startswith(n) for n in custom_natural)):
             if isinstance(other, Relation):
                 other_columns = [c.lower() for c in other.relation.columns]
             else:
                 other_columns = [c.lower() for c in other.columns]
-            using_columns = [
+            using_columns_lc = [
                 col.lower()
                 for col in self.relation.columns
                 if col.lower() in other_columns
             ]
+            using_columns = [
+                col for col in self.relation.columns
+                if col.lower() in using_columns_lc
+            ]
             if not using_columns:
                 raise ValueError("No common columns found for natural join.")
 
-        if not using_columns and "natural" not in how:
+        if not using_columns and how not in custom_natural:
             raise ValueError("using_columns must be non-empty unless using 'natural' join.")
 
         # Ensure using_columns contains unique values, preserving order
         seen = set()
         unique_columns = []
         for col in using_columns:
-            if col in seen:
+            col_lc = col.lower()
+            if col_lc in seen:
                 raise ValueError("using_columns must not contain duplicates.")
-            seen.add(col)
+            seen.add(col_lc)
             unique_columns.append(col)
         using_columns = unique_columns
+        using_columns_lc = [col.lower() for col in using_columns]
 
         # Check all columns exist in both relations (case-insensitive)
         if isinstance(other, Relation):
@@ -89,17 +100,94 @@ class Relation:
         if missing_cols:
             raise ValueError(f"Columns {missing_cols} not found in the second relation.")
 
-        # Perform the join
+        # Native join types
+        if how in native_hows:
+            if isinstance(other, Relation):
+                joined = self.relation.join(
+                    other.relation, using_columns, how=how
+                )
+                return Relation(joined, self.source)
+            else:
+                joined = self.relation.join(
+                    other, using_columns, how=how
+                )
+                return Relation(joined, self.source)
+
+        # Custom logic for natural and natural variants
+        # Compose SQL manually
+        def quote(col):
+            return f'"{col}"'
+
+        left_alias = "l"
+        right_alias = "r"
+
+        # Get SQL for both sides
+        left_sql = self.relation.query if hasattr(self.relation, "query") else self.relation.to_sql()
         if isinstance(other, Relation):
-            joined = self.relation.join(
-                other.relation, using_columns, how=how
-            )
-            return Relation(joined, self.source)
+            right_sql = other.relation.query if hasattr(other.relation, "query") else other.relation.to_sql()
+            right_columns = list(other.relation.columns)
         else:
-            joined = self.relation.join(
-                other, using_columns, how=how
+            right_sql = other.query if hasattr(other, "query") else other.to_sql()
+            right_columns = list(other.columns)
+
+        # Build join condition
+        on_clauses = [
+            f"{left_alias}.{quote(col)} = {right_alias}.{quote(col)}"
+            for col in using_columns
+        ]
+        on_clause = " AND ".join(on_clauses)
+
+        # Select columns: all from left, then right columns not in left
+        left_columns = list(self.relation.columns)
+        left_set = set(c.lower() for c in left_columns)
+        select_cols = [f"{left_alias}.{quote(col)} AS {quote(col)}" for col in left_columns]
+        select_cols += [
+            f"{right_alias}.{quote(col)} AS {quote(col)}"
+            for col in right_columns if col.lower() not in left_set
+        ]
+        select_clause = ", ".join(select_cols)
+
+        # Determine join type
+        if how == "natural":
+            join_type = "INNER JOIN"
+        elif how == "natural left":
+            join_type = "LEFT JOIN"
+        elif how == "natural semi":
+            # Only keep left rows with a match, no right columns
+            sql = f"""
+            SELECT {', '.join([f'{left_alias}.{quote(col)}' for col in left_columns])}
+            FROM ({left_sql}) AS {left_alias}
+            WHERE EXISTS (
+                SELECT 1 FROM ({right_sql}) AS {right_alias}
+                WHERE {on_clause}
             )
-            return Relation(joined, self.source)
+            """
+            result = self.source.sql(sql)
+            return Relation(result, self.source)
+        elif how == "natural anti":
+            # Only keep left rows with no match, no right columns
+            sql = f"""
+            SELECT {', '.join([f'{left_alias}.{quote(col)}' for col in left_columns])}
+            FROM ({left_sql}) AS {left_alias}
+            WHERE NOT EXISTS (
+                SELECT 1 FROM ({right_sql}) AS {right_alias}
+                WHERE {on_clause}
+            )
+            """
+            result = self.source.sql(sql)
+            return Relation(result, self.source)
+        else:
+            raise ValueError(f"Unsupported join type: {how}")
+
+        # Standard join SQL
+        sql = f"""
+        SELECT {select_clause}
+        FROM ({left_sql}) AS {left_alias}
+        {join_type} ({right_sql}) AS {right_alias}
+        ON {on_clause}
+        """
+        result = self.source.sql(sql)
+        return Relation(result, self.source)
 
     def asof_join(
         self,
