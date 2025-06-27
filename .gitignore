@@ -194,3 +194,4 @@ cython_debug/
 .cursorindexingignore
 .python-version
 .lock
+relational_api.txt
