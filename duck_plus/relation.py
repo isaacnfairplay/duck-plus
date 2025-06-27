@@ -111,24 +111,22 @@ class Relation:
         other: Union["Relation", duckdb.DuckDBPyRelation],
         on: Union[str, Sequence[str]],
         by: Optional[Sequence[str]] = None,
-        tolerance: Optional[str] = None,
-        direction: Literal["backward", "forward", "nearest"] = "backward",
+        operator: Literal[">=", "<=", "nearest"] = ">=",
     ) -> "Relation":
         """
-        Perform an asof join with another Relation or DuckDBPyRelation, mirroring DuckDB SQL ASOF JOIN syntax.
+        Perform an asof join with another Relation or DuckDBPyRelation, using a comparison operator for the join key.
 
         Args:
             other: The other Relation or DuckDBPyRelation to join with.
             on: The column name or list of column names to perform the asof join on.
             by: Optional list of column names to group by before joining.
-            tolerance: Optional string representing the maximum time difference allowed for the join.
-            direction: The direction of the asof join. Defaults to 'backward'.
+            operator: The comparison operator for the asof join key. Use ">=" for backward, "<=" for forward, or "nearest" for nearest match.
 
         Returns:
             A new Relation representing the joined result.
 
         Raises:
-            ValueError: If join columns are not found in either relation.
+            ValueError: If join columns are not found in either relation or if operator is invalid.
         """
         # Normalize 'on' to a list of column names
         if isinstance(on, str):
@@ -139,19 +137,27 @@ class Relation:
         if by is None:
             by = []
 
-        # Get quoted column names for SQL
         def quote(col):
             return f'"{col}"'
 
-        left_alias = "l"
-        right_alias = "r"
+        left_alias = self.relation.alias
+        if isinstance(other, Relation):
+            right_alias = other.relation.alias 
+        else:
+            right_alias = other.alias
+        if not left_alias:
+            raise ValueError("Left relation must have an alias for ASOF join.")
+        if not right_alias:
+            raise ValueError("Right relation must have an alias for ASOF join.")
 
         # Validate columns exist
         self_cols = set(c.lower() for c in self.relation.columns)
         if isinstance(other, Relation):
             other_cols = set(c.lower() for c in other.relation.columns)
+            right_rel = other.relation
         else:
             other_cols = set(c.lower() for c in other.columns)
+            right_rel = other
 
         missing_in_self = [col for col in on_columns if col.lower() not in self_cols]
         missing_in_other = [col for col in on_columns if col.lower() not in other_cols]
@@ -167,70 +173,143 @@ class Relation:
         if missing_by_other:
             raise ValueError(f"Columns {missing_by_other} not found in the second relation.")
 
-        # Build SQL for ASOF JOIN
-        left_sql = self.relation.query if hasattr(self.relation, "query") else self.relation.to_sql()
-        if isinstance(other, Relation):
-            right_sql = other.relation.query if hasattr(other.relation, "query") else other.relation.to_sql()
+        # Compose ON clause
+        on_clauses = []
+        for col in by:
+            on_clauses.append(f"{left_alias}.{quote(col)} = {right_alias}.{quote(col)}")
+        # ASOF join key with comparison operator
+        asof_col = on_columns[0]
+        if operator == ">=":
+            on_clauses.append(f"{left_alias}.{quote(asof_col)} >= {right_alias}.{quote(asof_col)}")
+        elif operator == "<=":
+            on_clauses.append(f"{left_alias}.{quote(asof_col)} <= {right_alias}.{quote(asof_col)}")
+        elif operator == "nearest":
+            on_clauses.append(
+                f"ABS({left_alias}.{quote(asof_col)} - {right_alias}.{quote(asof_col)}) = ("
+                f"SELECT MIN(ABS({left_alias}.{quote(asof_col)} - {right_alias}.{quote(asof_col)})) "
+                f"FROM {right_alias})"
+            )
         else:
-            right_sql = other.query if hasattr(other, "query") else other.to_sql()
+            raise ValueError(f"Invalid operator: {operator}. Must be '>=', '<=', or 'nearest'.")
+
+        # Get column lists
+        left_columns = list(self.relation.columns)
+        right_columns = [col.lower() for col in right_rel.columns]
+
+        # Columns to select: all left, then right columns not in left
+        select_cols = [f"{left_alias}.{quote(col)} AS {quote(col)}" for col in left_columns]
+        select_cols += [f"{right_alias}.{quote(col)} AS {quote(col)}" for col in right_columns if col.lower() not in [c.lower() for c in left_columns]]
+        select_clause = ",\n        ".join(select_cols)
+
+        sql = f"""
+        SELECT {select_clause}
+        FROM {left_alias}
+        LEFT JOIN {right_alias}
+        ON {' AND '.join(on_clauses)}
+        """
+
+        # Execute the SQL
+        result = self.source.sql(sql)
+        return Relation(result, self.source)
+        """
+        Perform an asof join with another Relation or DuckDBPyRelation, mirroring DuckDB SQL ASOF JOIN syntax.
+
+        Args:
+            other: The other Relation or DuckDBPyRelation to join with.
+            on: The column name or list of column names to perform the asof join on.
+            by: Optional list of column names to group by before joining.
+            direction: The direction of the asof join. Defaults to 'backward'.
+
+        Returns:
+            A new Relation representing the joined result.
+
+        Raises:
+            ValueError: If join columns are not found in either relation or if direction is invalid.
+        """
+        # Normalize 'on' to a list of column names
+        if isinstance(on, str):
+            on_columns = [on]
+        else:
+            on_columns = list(on)
+
+        if by is None:
+            by = []
+
+        # Get quoted column names for SQL
+        def quote(col):
+            return f'"{col}"'
+
+        left_alias = self.relation.alias
+        if isinstance(other, Relation):
+            right_alias = other.relation.alias 
+        else:
+            right_alias = other.alias
+        if not left_alias:
+            raise ValueError("Left relation must have an alias for ASOF join.")
+        if not right_alias:
+            raise ValueError("Right relation must have an alias for ASOF join.")
+        
+        # Validate columns exist
+        self_cols = set(c.lower() for c in self.relation.columns)
+        if isinstance(other, Relation):
+            other_cols = set(c.lower() for c in other.relation.columns)
+            right_rel = other.relation
+        else:
+            other_cols = set(c.lower() for c in other.columns)
+            right_rel = other
+
+        missing_in_self = [col for col in on_columns if col.lower() not in self_cols]
+        missing_in_other = [col for col in on_columns if col.lower() not in other_cols]
+        if missing_in_self:
+            raise ValueError(f"Columns {missing_in_self} not found in the first relation.")
+        if missing_in_other:
+            raise ValueError(f"Columns {missing_in_other} not found in the second relation.")
+
+        missing_by_self = [col for col in by if col.lower() not in self_cols]
+        missing_by_other = [col for col in by if col.lower() not in other_cols]
+        if missing_by_self:
+            raise ValueError(f"Columns {missing_by_self} not found in the first relation.")
+        if missing_by_other:
+            raise ValueError(f"Columns {missing_by_other} not found in the second relation.")
 
         # Compose ON clause
         on_clauses = []
         for col in by:
             on_clauses.append(f"{left_alias}.{quote(col)} = {right_alias}.{quote(col)}")
-        # ASOF join key
+        # ASOF join key with comparison operator
         asof_col = on_columns[0]
         if direction == "backward":
-            asof_op = "<="
+            on_clauses.append(f"{left_alias}.{quote(asof_col)} >= {right_alias}.{quote(asof_col)}")
         elif direction == "forward":
-            asof_op = ">="
+            on_clauses.append(f"{left_alias}.{quote(asof_col)} <= {right_alias}.{quote(asof_col)}")
         elif direction == "nearest":
-            asof_op = "<="
+            on_clauses.append(f"{left_alias}.{quote(asof_col)} >= {right_alias}.{quote(asof_col)} OR {left_alias}.{quote(asof_col)} <= {right_alias}.{quote(asof_col)}")
         else:
-            raise ValueError(f"Unsupported direction: {direction}")
-
-        on_clauses.append(f"{left_alias}.{quote(asof_col)} {asof_op} {right_alias}.{quote(asof_col)}")
-
-        # Tolerance clause
-        tolerance_clause = ""
-        if tolerance is not None:
-            tolerance_clause = (
-                f" AND ABS({left_alias}.{quote(asof_col)} - {right_alias}.{quote(asof_col)}) <= INTERVAL '{tolerance}'"
-            )
-
-        # Handle column selection and aliasing for ASOF JOIN result
-        # DuckDB will include all columns from both tables, prefixing duplicates with r_. 
-        # We want to show left table values for overlapping columns, unless not present in right.
-        # So, we explicitly select columns: left columns, then right columns not in left.
+            raise ValueError(f"Invalid direction: {direction}. Must be 'backward', 'forward', or 'nearest'.")
 
         # Get column lists
         left_columns = list(self.relation.columns)
-        if isinstance(other, Relation):
-            right_columns = [col.lower() for col in other.relation.columns]
-        else:
-            right_columns = [col.lower() for col in other.columns]
-
-        # Lowercase sets for comparison
-        left_set = set(left_columns)
-        right_set = set(right_columns)
+        right_columns = [col.lower() for col in right_rel.columns]
 
         # Columns to select: all left, then right columns not in left
         select_cols = [f"{left_alias}.{quote(col)} AS {quote(col)}" for col in left_columns]
-        select_col.extend([col for col in left_columns if col not in right_set])
-        
+        select_cols += [f"{right_alias}.{quote(col)} AS {quote(col)}" for col in right_columns if col.lower() not in [c.lower() for c in left_columns]]
         select_clause = ",\n        ".join(select_cols)
         
+
+        # Set join type
         join_type = "ASOF"
         if direction == "forward":
             join_type = "ASOF FORWARD"
         elif direction == "nearest":
             join_type = "ASOF NEAREST"
 
+
         sql = f"""
-        SELECT *
-        FROM ({left_sql}) AS {left_alias}
-        {join_type} JOIN ({right_sql}) AS {right_alias}
-        ON {' AND '.join(on_clauses)}{tolerance_clause}
+        SELECT {select_clause}
+        FROM {left_alias}
+        {join_type} JOIN {right_alias}
+        ON {' AND '.join(on_clauses)}
         """
 
         # Execute the SQL

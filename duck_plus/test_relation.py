@@ -21,7 +21,8 @@ def sample_relations(duckdb_conn):
 
 def test_using_join_inner(sample_relations):
     rel1, rel2 = sample_relations
-    joined = rel1.using_join(rel2, how="inner", using_columns=["id"])
+    joined = rel1.using_join(rel2, 
+            how="inner", using_columns=["id"])
     result = joined.relation.fetchall()
     assert len(result) == 2
     assert {row[0] for row in result} == {1, 2}
@@ -92,14 +93,15 @@ def test_asof_join_direction_forward(duckdb_conn):
     duckdb_conn.execute("INSERT INTO t8 VALUES (1, '2023-01-01 10:01:00')")
     rel7 = Relation(duckdb_conn.table("t7"), duckdb_conn)
     rel8 = Relation(duckdb_conn.table("t8"), duckdb_conn)
-    joined = rel7.asof_join(rel8, on="ts", by=["id"], direction="forward")
+    # For direction="forward", the operator should be <=
+    joined = rel7.asof_join(rel8, on="ts", by=["id"], operator="<=")
     result = joined.relation.fetchall()
-    assert len(result) == 1
+    assert len(result) == 1 # Should find the match
 
 def test_asof_join_invalid_direction(sample_relations):
     rel1, rel2 = sample_relations
     with pytest.raises(ValueError):
-        rel1.asof_join(rel2, on="ts", direction="invalid")
+        rel1.asof_join(rel2, on="ts", operator="invalid")
 
 def test_repr(sample_relations):
     rel1, _ = sample_relations
